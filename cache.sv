@@ -30,7 +30,7 @@ module ucsbece154b_icache #(
   localparam LOG_BLOCK_WORDS = $clog2(BLOCK_WORDS);
   integer i, j, k, l;
 
-  typedef enum logic [1:0] {read, delay, write} state_t;
+  typedef enum logic [1:0] {read, delay, words, write} state_t;
   state_t stateNext, stateReg;
 
   typedef logic [WORD_SIZE-1:0] word_t; // a word is 32 bits
@@ -42,18 +42,27 @@ module ucsbece154b_icache #(
     block_t data; 
   } way_t;
 
+  typedef struct {
+    logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] tag;
+    block_t data;
+  } buffer_t;
+
   typedef way_t set_t [0:NUM_WAYS-1]; // 4 ways in a set
   set_t SRAM [0:NUM_SETS-1]; // 8 sets in the memory
+
+  buffer_t buffer;
 
   logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] tagIndex;
   logic [LOG_NUM_SETS-1:0] setIndex;
   logic [LOG_BLOCK_WORDS-1:0] blockIndex;
   logic cacheHit;
   logic [31:0] DataIn;
+  logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] memTagIndex;
+  logic [LOG_BLOCK_WORDS-1:0] memBlockIndex;
   
   logic [LOG_NUM_WAYS-1:0] hitWay;
 
-  logic [LOG_BLOCK_WORDS-1:0] write_wait_counter;
+  logic [LOG_BLOCK_WORDS-1:0] words_wait_counter;
 
   logic [15:0] lfsr;
   logic [1:0] randBits;
@@ -120,29 +129,28 @@ module ucsbece154b_icache #(
       end
     end else begin
       DataIn <= memDataIn;
-      if (stateReg == write) begin // synchronous write
-        SRAM[setIndex][randBits].v <= 1;
-        SRAM[setIndex][randBits].tag <= tagIndex;
-        SRAM[setIndex][randBits].data[write_wait_counter] <= DataIn;
+      if (stateReg == words) begin
+        buffer.tag <= memTagIndex;
+        buffer.data[memBlockIndex] <= memDataIn;
       end
+      // if (stateReg == write) begin // synchronous write
+      //   SRAM[setIndex][randBits].v <= 1;
+      //   SRAM[setIndex][randBits].tag <= tagIndex;
+      //   SRAM[setIndex][randBits].data[words_wait_counter] <= DataIn;
+      
+      // write
     end
-      // how to implement the synchronous write? must occur when correct data is received from SDRAM
-      // maybe match block address with that of the incoming data's order?
-      // this needs to be based off of DataIn, DataReady signals
-      // memReadAddress is the address requested, which is [31:0]. since the entire block is sent over one word at a time, need to pick the right word.
-      // do so by remembering memReadAddress[3:2], which is the block offset. that will tell cache when the correct word will arrive.
-      // make new counter counting up to block offset of memReadAddress
   end
 
-  // counter for write_wait
+  // counter for words_wait
   always_ff @(posedge clk) begin
     if (reset || (stateReg == delay && stateNext == write)) begin // set to 0 upon reset or transition to write
-      write_wait_counter <= 0;
+      words_wait_counter <= 0;
     end else begin
-      if (write_wait_counter == BLOCK_WORDS - 1)
-        write_wait_counter <= 0;
+      if (words_wait_counter == BLOCK_WORDS - 1)
+        words_wait_counter <= 0;
       else
-        write_wait_counter <= write_wait_counter + 1;
+        words_wait_counter <= words_wait_counter + 1;
     end
   end
 
@@ -161,13 +169,16 @@ module ucsbece154b_icache #(
       end
       delay: begin
         if (memDataReady)
-          stateNext = write;
+          stateNext = words;
         if (cacheHit)
           stateNext = read;
       end
+      words: begin
+        if (words_wait_counter == BLOCK_WORDS - 1)
+          stateNext = write;
+      end
       write: begin
-        if (write_wait_counter == BLOCK_WORDS - 1)
-          stateNext = read;
+        stateNext = read;
       end
     endcase;
   end
@@ -219,4 +230,3 @@ end
   assign randBits = lfsr[LOG_BLOCK_WORDS-1:0];
 
 endmodule
-
