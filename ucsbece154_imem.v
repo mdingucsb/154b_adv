@@ -32,8 +32,10 @@ module ucsbece154_imem #(
   reg [5:0] fetch_count;
   reg [31:0] send_count;
   reg [31:0] first_address;
+  wire [31:0] base_address;
+  wire [LOG_BLOCK_WORDS:0] word_index;
 
-  wire [1:0] block_index;
+  wire [LOG_BLOCK_WORDS:0] block_index;
 
   reg [31:0] a_i;
 
@@ -42,6 +44,8 @@ module ucsbece154_imem #(
 // Implement SDRAM interface here
 
   assign block_index = ReadAddress[LOG_BLOCK_WORDS+1:2];
+  assign base_address = {ReadAddress[31:LOG_BLOCK_WORDS+2], {LOG_BLOCK_WORDS+2{1'b0}}};
+  assign word_index = a_i[LOG_BLOCK_WORDS+1:2];
 
   always @(posedge clk) begin
     if (state_reg == idle && state_next == fetch)
@@ -51,16 +55,14 @@ module ucsbece154_imem #(
   always @(posedge clk) begin
     if (state_reg == idle)
       a_i <= ReadAddress;
-//    else if (state_reg == send_rest && state_next == send_first)
-//      a_i <= first_address;
-    else if (state_reg == send_first && state_next == send_rest)
-      if (block_index == 0)
-        a_i <= first_address + 4;
-      else
-        a_i <= first_address - 4 * (block_index);
+    else if (state_reg == send_first && state_next == send_rest) // after first word
+        if (word_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
+          a_i <= a_i - 4 * (BLOCK_WORDS - 1);
+        else
+          a_i <= a_i + 4;
     else if (state_reg == send_rest) begin
-      if (a_i[3:2] == block_index - 1)
-        a_i <= a_i + 8;
+      if (word_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
+        a_i <= a_i - 4 * (BLOCK_WORDS - 1);
       else
         a_i <= a_i + 4;
     end
