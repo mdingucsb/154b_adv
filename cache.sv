@@ -21,14 +21,15 @@ module ucsbece154b_icache #(
   output logic memReadRequest, // asserted when cache miss, lowered when data ready received (assert for roughly T0)
   input logic FlushD,
   output logic FlushD_alt,
-  output logic read_to_delay
+  output logic read_to_delay,
+  input logic [1:0] memBlockIndex // need to change when changing parameters
 );
 
-  localparam LOG_NUM_SETS = $clog2(NUM_SETS);
+  parameter LOG_NUM_SETS = $clog2(NUM_SETS);
+  parameter LOG_NUM_WAYS = $clog2(NUM_WAYS);
+  parameter LOG_BLOCK_WORDS = $clog2(BLOCK_WORDS);
 
-  localparam LOG_NUM_WAYS = $clog2(NUM_WAYS);
-  localparam LOG_BLOCK_WORDS = $clog2(BLOCK_WORDS);
-  integer i, j, k, l;
+  integer i, j, k, l, m;
 
   typedef enum logic [1:0] {read, delay, words, write} state_t;
   state_t stateNext, stateReg;
@@ -42,23 +43,21 @@ module ucsbece154b_icache #(
     block_t data; 
   } way_t;
 
-  typedef struct {
-    logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] tag;
-    block_t data;
-  } buffer_t;
 
   typedef way_t set_t [0:NUM_WAYS-1]; // 4 ways in a set
   set_t SRAM [0:NUM_SETS-1]; // 8 sets in the memory
 
-  buffer_t buffer;
+  logic [29-LOG_BLOCK_WORDS:0] bufferTag;
+  logic [31:0] bufferData [0:3];
 
   logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] tagIndex;
   logic [LOG_NUM_SETS-1:0] setIndex;
+  logic [LOG_NUM_SETS-1:0] setIndex_w;
+  logic [LOG_NUM_SETS-1:0] setIndex_i;
   logic [LOG_BLOCK_WORDS-1:0] blockIndex;
   logic cacheHit;
   logic [31:0] DataIn;
   logic [29-LOG_NUM_SETS-LOG_BLOCK_WORDS:0] memTagIndex;
-  logic [LOG_BLOCK_WORDS-1:0] memBlockIndex;
   
   logic [LOG_NUM_WAYS-1:0] hitWay;
 
@@ -68,18 +67,24 @@ module ucsbece154b_icache #(
   logic [1:0] randBits;
 
   logic FlushD_tmp;
+  logic [LOG_BLOCK_WORDS:0] num_words;
 
   assign tagIndex = readAddress[31:LOG_NUM_SETS+LOG_BLOCK_WORDS+2]; // [31:7]
   assign setIndex = readAddress[LOG_NUM_SETS+LOG_BLOCK_WORDS+1:LOG_BLOCK_WORDS+2]; // [6:4]
   assign blockIndex = readAddress[LOG_BLOCK_WORDS+1:2]; // [3:2]
+  assign memTagIndex = memReadAddress[31:LOG_NUM_SETS+LOG_BLOCK_WORDS+2];
 
+  always_ff @(posedge clk) begin
+    if (stateReg == delay && stateNext == words)
+       num_words <= BLOCK_WORDS - readAddress[3:2];
+  end
   always_comb begin
     // defaults
     busy = 1'b0;
     memReadAddress = readAddress;
     memReadRequest = 1'b0;
     ready = 1'b0;
-
+    instruction = 32'h00000013;
     cacheHit = 1'b0;
     hitWay = 2'b00;
 
@@ -96,17 +101,41 @@ module ucsbece154b_icache #(
           instruction = SRAM[setIndex][hitWay].data[blockIndex];
           ready = 1'b1;
         end else begin
-          instruction <= 32'h00000013;
+          instruction = 32'h00000013;
           memReadRequest = 1'b1;
         end
       end
       delay: begin
         memReadRequest = 1'b1;
-        for (l = 0; l < NUM_WAYS; l++) begin
-          if (tagIndex == SRAM[setIndex][l].tag && SRAM[setIndex][l].v) begin // if match and valid
-            cacheHit = 1'b1;
-            hitWay = l;
+        if (stateNext == write)
+	  instruction = 32'h00000013;
+        if (stateNext == words) begin
+          ready = 1'b1;
+          for (l = 0; l < NUM_WAYS; l++) begin
+            if (tagIndex == SRAM[setIndex][l].tag && SRAM[setIndex][l].v) begin // if match and valid
+              cacheHit = 1'b1;
+              hitWay = l;
+            end
           end
+          if (cacheHit)
+            instruction = SRAM[setIndex][hitWay].data[blockIndex];
+	  else
+	    instruction = memDataIn;
+        end
+      end
+      words: begin
+        if (stateNext == words) begin
+          ready = 1'b1;
+          for (l = 0; l < NUM_WAYS; l++) begin
+            if (tagIndex == SRAM[setIndex][l].tag && SRAM[setIndex][l].v) begin // if match and valid
+              cacheHit = 1'b1;
+              hitWay = l;
+            end
+          end
+          if (cacheHit)
+            instruction = SRAM[setIndex][hitWay].data[blockIndex];
+	  else
+	    instruction = memDataIn;
         end
       end
       write: begin
@@ -129,22 +158,23 @@ module ucsbece154b_icache #(
       end
     end else begin
       DataIn <= memDataIn;
-      if (stateReg == words) begin
-        buffer.tag <= memTagIndex;
-        buffer.data[memBlockIndex] <= memDataIn;
+      if (stateNext == words) begin
+        bufferTag <= memTagIndex;
+        bufferData [memBlockIndex] <= memDataIn;
       end
-      // if (stateReg == write) begin // synchronous write
-      //   SRAM[setIndex][randBits].v <= 1;
-      //   SRAM[setIndex][randBits].tag <= tagIndex;
-      //   SRAM[setIndex][randBits].data[words_wait_counter] <= DataIn;
-      
-      // write
+      if (stateNext == write) begin
+        SRAM[setIndex_w][randBits].v <= 1;
+        SRAM[setIndex_w][randBits].tag <= tagIndex;
+        for (m = 0; m < BLOCK_WORDS; m++) begin
+          SRAM[setIndex_w][randBits].data[m] <= bufferData[m];
+        end
+      end
     end
   end
 
   // counter for words_wait
   always_ff @(posedge clk) begin
-    if (reset || (stateReg == delay && stateNext == write)) begin // set to 0 upon reset or transition to write
+    if (reset || (stateReg == delay && stateNext == words)) begin // set to 0 upon reset or transition to write
       words_wait_counter <= 0;
     end else begin
       if (words_wait_counter == BLOCK_WORDS - 1)
@@ -174,11 +204,17 @@ module ucsbece154b_icache #(
           stateNext = read;
       end
       words: begin
-        if (words_wait_counter == BLOCK_WORDS - 1)
+        if (words_wait_counter == num_words - 1)
           stateNext = write;
       end
       write: begin
         stateNext = read;
+/*
+        if (cacheHit)
+          stateNext = read;
+        else
+          stateNext = delay;
+*/
       end
     endcase;
   end
@@ -187,10 +223,15 @@ module ucsbece154b_icache #(
   always_ff @(posedge clk) begin
     if (reset) begin
       stateReg <= read;
+      setIndex_w <= 0;
+      setIndex_i <= 0;
     end else begin
       stateReg <= stateNext;
+      setIndex_w <= setIndex_i;
+      setIndex_i <= setIndex;
     end
   end
+
 
   // FlushD_alt logic (latching FlushD during memory fetch delay)
   
@@ -228,5 +269,7 @@ end
 
 
   assign randBits = lfsr[LOG_BLOCK_WORDS-1:0];
+
+  
 
 endmodule
