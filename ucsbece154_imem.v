@@ -17,7 +17,8 @@ module ucsbece154_imem #(
     input wire [31:0] ReadAddress,
 
     output reg [31:0] DataIn,
-    output reg DataReady
+    output reg DataReady,
+    output wire [1:0] block_index // need to change when changing parameter
 );
 
   parameter LOG_BLOCK_WORDS = $clog2(BLOCK_WORDS);
@@ -31,45 +32,43 @@ module ucsbece154_imem #(
   reg fetch_start, send_start;
   reg [5:0] fetch_count;
   reg [31:0] send_count;
-  reg [31:0] first_address;
+  reg [31:0] a_i_old;
   wire [31:0] base_address;
-  wire [LOG_BLOCK_WORDS:0] word_index;
-
-  wire [LOG_BLOCK_WORDS:0] block_index;
 
   reg [31:0] a_i;
 
   wire [31:0] rd_o;
+  reg [LOG_BLOCK_WORDS:0] num_words;
 
 // Implement SDRAM interface here
 
-  assign block_index = ReadAddress[LOG_BLOCK_WORDS+1:2];
   assign base_address = {ReadAddress[31:LOG_BLOCK_WORDS+2], {LOG_BLOCK_WORDS+2{1'b0}}};
-  assign word_index = a_i[LOG_BLOCK_WORDS+1:2];
 
   always @(posedge clk) begin
-    if (state_reg == idle && state_next == fetch)
-      first_address <= ReadAddress;
+      if (state_reg == fetch && state_next == send_first)
+       num_words <= BLOCK_WORDS - block_index;
   end
 
   always @(posedge clk) begin
-    if (state_reg == idle)
+    if (state_reg == idle || state_next == fetch)
       a_i <= ReadAddress;
     else if (state_reg == send_first && state_next == send_rest) // after first word
-        if (word_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
+        if (block_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
           a_i <= a_i - 4 * (BLOCK_WORDS - 1);
         else
           a_i <= a_i + 4;
     else if (state_reg == send_rest) begin
-      if (word_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
+      if (block_index == (BLOCK_WORDS - 1)) // jump to first word of block if needed
         a_i <= a_i - 4 * (BLOCK_WORDS - 1);
       else
         a_i <= a_i + 4;
     end
     else
-      a_i <= a_i;
+      a_i <= ReadAddress;
   end
- 
+  
+  assign block_index = a_i[3:2];
+   
   always @(*) begin
     if (state_reg == send_first || state_reg == send_rest) begin
       DataIn = rd_o;
@@ -103,7 +102,7 @@ module ucsbece154_imem #(
       end
       send_rest: begin
         DataReady = 1'b1;
-        if (send_count == BLOCK_WORDS - 1) state_next = idle;
+        if (send_count == num_words - 1) state_next = idle;
       end
       default: state_next = idle;
     endcase
