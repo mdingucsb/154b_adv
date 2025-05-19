@@ -57,6 +57,7 @@ module ucsbece154b_datapath (
 wire [31:0] PCTargetE;
 wire [31:0] PCcorrecttargetE;
 reg [31:0] ResultW;
+reg read_to_delay_delayed;
 // wire MisspredictE;
 
 // ***** FETCH STAGE *********************************
@@ -75,11 +76,15 @@ assign PCnewF_o = PCnewF;
 //wire [NUM_GHR_BITS-1:0] PHTindexF;
 wire [$clog2(`GL_NUM_PHT_ENTRIES)-1:0] PHTindexF;
 
+always @ (posedge clk) begin
+  read_to_delay_delayed <= read_to_delay;
+end
+
 // Update registers
 always @ (posedge clk) begin
     if (reset)        PCF_o <= pc_start;
     else if (!StallF_i) PCF_o <= PCnewF;
-    else if (read_to_delay && MisspredictE_o) PCF_o <= PCnewF;
+    else if ((read_to_delay || read_to_delay_delayed) && MisspredictE_o) PCF_o <= PCnewF;
 end
 
 // ***** DECODE STAGE ********************************
